@@ -1,0 +1,16 @@
+# yourfs pkg-config file
+
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: yourfs
+Description: yourfs is a fuse module for NFSv3,NFSv4
+Version: 1.0.0
+Requires:
+Conflicts:
+Libs: -L${libdir}
+Cflags: -I${includedir}
+
+
