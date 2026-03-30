@@ -26,6 +26,19 @@ The basic interface of the file system is defined through the VFS operation inte
     `yum install libpq-devel（using postgresql-devel to replace for centos7） libsq3-devel libnfs-devel fuse-devel fuse libtool m4 automake make`
 
     `rpm -ivh rocky_version_.rpm  --replacefiles`
+    
+
+#### Building yourfs from source code
+
+    `$ cd yourfs`
+
+    `$ ./setup.sh`
+
+    `$ ./configure --with-postgres --with-sqlite3`
+
+    `$ make `
+
+    `$ make install`
 
 
 #### Usage
