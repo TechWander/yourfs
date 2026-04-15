@@ -47,12 +47,17 @@ Building this file system mainly involves database construction and mounting ope
 1.  Generate the database
 
     1.1 scan the file structure under the /path directory of the local system and write it to the data.txt file
+    
     `yourfs_tool -s /path -o data.txt `
 
     1.2 write the contents of the data.txt file into database(before writing, you can modify the content of the data.txt file to achieve the needs of isolating files or modifying file path locations)
-    1.2.1 for sqlite3. 
+    
+    1.2.1 for sqlite3.
+    
     `yourfs_tool -F sqlite3 -M10 -i data.txt -X data.db -Z data `
+    
     1.2.2 for postgres
+    
     `yourfs_tool -F postgres -i data.txt -X ip,port,user,passwd,dbname  -Z data` 
 
 3.  Mount the folder
