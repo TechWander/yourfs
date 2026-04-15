@@ -64,11 +64,11 @@ Building this file system mainly involves database construction and mounting ope
 
         sqlite3:
 
-        yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F sqlite3 -X data.db -Z data -M 10 -A # Asynchronously mount the mountable path /path to the ./tmp path
+        yourfs -n nfs://ip/path -m ./tmp/ -F sqlite3 -X data.db -Z data -M 10 -A # Asynchronously mount the mountable path /path to the ./tmp path
 
         postgres:
 
-        yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F postgres -X ip,port,user,passwd,dbname -Z data -A # Asynchronously mount the mountable path /path to the ./tmp path
+        yourfs -n nfs://ip/path -m ./tmp/ -F postgres -X ip,port,user,passwd,dbname -Z data -A # Asynchronously mount the mountable path /path to the ./tmp path
     
 5.  Unmount
 
