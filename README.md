@@ -48,27 +48,27 @@ Building this file system mainly involves database construction and mounting ope
 
     1.1 scan the file structure under the /path directory of the local system and write it to the data.txt file
     
-    `yourfs_tool -s /path -o data.txt `
+        yourfs_tool -s /path -o data.txt 
 
     1.2 write the contents of the data.txt file into database(before writing, you can modify the content of the data.txt file to achieve the needs of isolating files or modifying file path locations)
     
         sqlite3:
     
-        `yourfs_tool -F sqlite3 -M10 -i data.txt -X data.db -Z data `
+        yourfs_tool -F sqlite3 -M10 -i data.txt -X data.db -Z data 
     
         postgres:
     
-        `yourfs_tool -F postgres -i data.txt -X ip,port,user,passwd,dbname  -Z data` 
+        yourfs_tool -F postgres -i data.txt -X ip,port,user,passwd,dbname  -Z data
 
 3.  Mount the folder
 
-         sqlite3:
+        sqlite3:
 
-        `yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F sqlite3 -X data.db -Z data -M 10 -A # Asynchronously mount the mountable path /path to the ./tmp path`
+        yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F sqlite3 -X data.db -Z data -M 10 -A # Asynchronously mount the mountable path /path to the ./tmp path
 
-         postgres:
+        postgres:
 
-          `yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F postgres -X ip,port,user,passwd,dbname -Z data -A # Asynchronously mount the mountable path /path to the ./tmp path`
+        yourfs -n nfs://127.0.0.1/path -m ./tmp/ -F postgres -X ip,port,user,passwd,dbname -Z data -A # Asynchronously mount the mountable path /path to the ./tmp path
     
 5.  Unmount
 
