@@ -349,15 +349,19 @@ fn handle_task(ctx: *mut nfs_context, cfg: &Cfg, task: Task, inflight: &AtomicUs
         update_rpc_credentials(ctx, cfg, uid, gid);
     }
     let p = Box::into_raw(pending);
+    // Count the request as in flight *before* issuing it: if libnfs ever
+    // completes a call synchronously inside the *_async issue (an error
+    // path), the callback's fetch_sub would otherwise run before our
+    // fetch_add and underflow the counter, pinning the pump loop forever.
+    inflight.fetch_add(1, Ordering::SeqCst);
     let ret = issue(ctx, p);
     if ret < 0 {
+        inflight.fetch_sub(1, Ordering::SeqCst);
         // not queued: no callback will ever run, complete it here
         let p = unsafe { *Box::from_raw(p) };
         let reply = p.reply.clone();
         drop(p);
         let _ = reply.send(Reply::err(ret));
-    } else {
-        inflight.fetch_add(1, Ordering::SeqCst);
     }
     true
 }

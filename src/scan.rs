@@ -17,15 +17,37 @@ pub fn walk(dir: &Path, replace_num: usize, out: &mut dyn Write) {
         Err(_) => return,
     };
     for ent in rd.flatten() {
-        let name = ent.file_name().to_string_lossy().into_owned();
+        // File names are byte strings and may be invalid UTF-8 (legacy
+        // GBK/Latin-1 names). A lossy conversion would silently corrupt the
+        // whitelist: two distinct names can collapse into one (duplicate
+        // readdir entries, one file shadowing the other) and the stored
+        // realpath no longer exists on the export. The text/DB pipeline
+        // cannot represent such bytes at all (postgres rejects invalid
+        // UTF-8 outright), so skip the entry with a loud warning instead,
+        // the same policy as for names containing newlines. Skipping the
+        // directory itself also drops its subtree, whose paths would all
+        // carry the corrupt prefix.
+        let name = match ent.file_name().to_str() {
+            Some(s) => s.to_string(),
+            None => {
+                eprintln!(
+                    "{}: skipping non-UTF-8 entry (raw bytes cannot be stored in the whitelist)",
+                    dir.display()
+                );
+                continue;
+            }
+        };
         if name == "." || name == ".." {
             continue;
         }
         let child = ent.path();
         // full local path, then strip the scan root; the slice may start
-        // without '/' (e.g. root-relative paths already consumed the slash),
-        // so restore the leading '/' or split_path would yield parent=""
-        // and the whole whitelist row could never be resolved again.
+        // without '/' (root-relative paths already consumed the slash), so
+        // the leading '/' is restored below or split_path would yield
+        // parent="" and the row could never be resolved again. Every
+        // component is valid UTF-8 here (the scan root comes from a Rust
+        // String and each name passed the check above), so `to_string_lossy`
+        // is a borrowed no-op and the slice always hits a char boundary.
         let local = child.to_string_lossy().into_owned();
         let mut out_path: String = if local.len() > replace_num {
             let rest = &local[replace_num..];
@@ -192,5 +214,35 @@ mod tests {
         // the wrong number of fields: refuse instead of mispairing columns
         assert!(parse_row("/a  b  /a/b c d").is_none());
         assert!(parse_row("only  two").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_skips_non_utf8_names() {
+        use std::os::unix::ffi::OsStrExt;
+        // scan must never lossy-convert invalid UTF-8 bytes into the output:
+        // the bad file and the bad directory (with its whole subtree) are
+        // dropped, valid siblings survive
+        let root = std::env::temp_dir().join(format!("yfs-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("good.txt"), b"x").unwrap();
+        std::fs::write(root.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name")), b"x").unwrap();
+        std::fs::create_dir(root.join(std::ffi::OsStr::from_bytes(b"dir-\xfe"))).unwrap();
+        std::fs::write(
+            root.join(std::ffi::OsStr::from_bytes(b"dir-\xfe")).join("inside.txt"),
+            b"y",
+        )
+        .unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        super::walk(&root, root.to_str().unwrap().len(), &mut out);
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("good.txt"), "valid entry lost: {text}");
+        assert!(!text.contains("bad-"), "non-UTF-8 file leaked into output");
+        assert!(!text.contains("dir-"), "non-UTF-8 dir leaked");
+        assert!(!text.contains("inside.txt"), "subtree of bad dir leaked");
+        assert!(!text.contains('\u{fffd}'), "lossy replacement char emitted");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

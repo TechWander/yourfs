@@ -211,34 +211,6 @@ impl Parser {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{parse_f64, parse_i64};
-
-    #[test]
-    fn atoi_prefix_semantics() {
-        assert_eq!(parse_i64("1000"), 1000);
-        assert_eq!(parse_i64("  42x"), 42);
-        assert_eq!(parse_i64("1000&gid=2000"), 1000);
-        assert_eq!(parse_i64("-7abc"), -7);
-        assert_eq!(parse_i64("abc"), 0);
-        assert_eq!(parse_i64(""), 0);
-        assert_eq!(parse_i64("+"), 0);
-        assert_eq!(parse_i64("99999999999999999999999"), 0); // overflow -> like atoi's garbage, clamped to 0 via parse fail
-    }
-
-    #[test]
-    fn atof_prefix_semantics() {
-        assert_eq!(parse_f64("10.5"), 10.5);
-        assert_eq!(parse_f64("10.5MB"), 10.5);
-        assert_eq!(parse_f64(".5x"), 0.5);
-        assert_eq!(parse_f64("1e3"), 1000.0);
-        assert_eq!(parse_f64("1e"), 1.0);
-        assert_eq!(parse_f64("xyz"), 0.0);
-        assert_eq!(parse_f64("-"), 0.0);
-    }
-}
-
 /// The `long_opts[]` + optstring of the C `yourfs` binary.
 pub const YOURFS_SPECS: &[OptSpec] = &[
     OptSpec { short: '?', long: "help", arg: false },
@@ -301,3 +273,31 @@ pub const TOOL_SPECS: &[OptSpec] = &[
     OptSpec { short: 'F', long: "filter_database", arg: true },
     OptSpec { short: 'P', long: "passwd", arg: true },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_f64, parse_i64};
+
+    #[test]
+    fn atoi_prefix_semantics() {
+        assert_eq!(parse_i64("1000"), 1000);
+        assert_eq!(parse_i64("  42x"), 42);
+        assert_eq!(parse_i64("1000&gid=2000"), 1000);
+        assert_eq!(parse_i64("-7abc"), -7);
+        assert_eq!(parse_i64("abc"), 0);
+        assert_eq!(parse_i64(""), 0);
+        assert_eq!(parse_i64("+"), 0);
+        assert_eq!(parse_i64("99999999999999999999999"), 0); // overflow -> like atoi's garbage, clamped to 0 via parse fail
+    }
+
+    #[test]
+    fn atof_prefix_semantics() {
+        assert_eq!(parse_f64("10.5"), 10.5);
+        assert_eq!(parse_f64("10.5MB"), 10.5);
+        assert_eq!(parse_f64(".5x"), 0.5);
+        assert_eq!(parse_f64("1e3"), 1000.0);
+        assert_eq!(parse_f64("1e"), 1.0);
+        assert_eq!(parse_f64("xyz"), 0.0);
+        assert_eq!(parse_f64("-"), 0.0);
+    }
+}
