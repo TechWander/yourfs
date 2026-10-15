@@ -1,0 +1,27 @@
+[package]
+name = "yourfs"
+version = "1.0.0"
+edition = "2021"
+description = "A read-only file system with file isolation capabilities over NFS (Rust rewrite of yourfs)"
+license = "GPL-2.0-or-later"
+
+[lib]
+name = "yourfs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yourfs"
+path = "src/bin/yourfs.rs"
+
+[[bin]]
+name = "yourfs-tool"
+path = "src/bin/yourfs_tool.rs"
+
+[dependencies]
+libc = "0.2"
+rusqlite = { version = "0.31", features = ["bundled"] }
+postgres = "0.19"
+redis = "0.25"
+
+[build-dependencies]
+pkg-config = "0.3"

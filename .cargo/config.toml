@@ -1,0 +1,4 @@
+# Fully-static musl build uses Rust's default self-contained linking
+# (rust-lld + the musl sysroot's own crt objects). Overriding the linker to
+# `musl-gcc` here was tried and produced a static-PIE whose rcrt1.o crashes in
+# _start_c before main(), so we deliberately leave the linker unset.
