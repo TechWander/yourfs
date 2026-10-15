@@ -50,7 +50,7 @@ fn main() {
                     'i' => o.input_filename = v,
                     'X' => o.database = v,
                     'Z' => o.table = v,
-                    'M' => o.cache_memory = (v.trim().parse::<f64>().unwrap_or(0.0) * 1000.0) as i64,
+                    'M' => o.cache_memory = (cli::parse_f64(&v) * 1000.0) as i64,
                     'F' => o.database_type = v,
                     'P' => {} // accepted like the C version; PASSWD module off
                     _ => {}
@@ -99,17 +99,28 @@ fn main() {
     }
     let reader = std::io::BufReader::new(file);
     let mut n = 0usize;
-    for line in reader.lines() {
+    let mut skipped = 0usize;
+    for (ln, line) in reader.lines().enumerate() {
         let line = match line {
             Ok(l) => l,
             Err(_) => continue,
         };
-        // fscanf("%s %s %s") semantics: three whitespace-separated columns
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 3 {
-            continue;
-        }
-        if let Err(e) = w.insert(&o.table, cols[0], cols[1], cols[2]) {
+        // Three columns per row; plain fields are whitespace-separated like
+        // the C `fscanf("%s %s %s")` format, names containing whitespace are
+        // double-quoted by `scan` (see `scan::parse_row`). A row that does
+        // not tokenize to exactly three fields is corrupted input: skip and
+        // count it rather than inserting mispaired columns.
+        let cols = match scan::parse_row(&line) {
+            Some(c) => c,
+            None => {
+                if !line.trim().is_empty() {
+                    eprintln!("{}: malformed row on line {}, skipped", o.input_filename, ln + 1);
+                    skipped += 1;
+                }
+                continue;
+            }
+        };
+        if let Err(e) = w.insert(&o.table, &cols[0], &cols[1], &cols[2]) {
             eprintln!("insert failed at row {n}: {e}");
             std::process::exit(1);
         }
@@ -120,6 +131,9 @@ fn main() {
         std::process::exit(1);
     }
     println!("{} rows written into table '{}' ({})", n, o.table, o.database_type);
+    if skipped > 0 {
+        println!("{skipped} malformed rows skipped");
+    }
 }
 
 fn print_usage() {

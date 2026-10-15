@@ -267,10 +267,15 @@ impl Database for SqliteDb {
         let sql = format!(
             "SELECT realpath FROM {table} WHERE parent=?1 AND name=?2 LIMIT 1"
         );
-        let mut stmt = conn.prepare(&sql)?;
+        // prepare_cached: reuse the statement across the ~one query per FUSE
+        // operation instead of re-compiling it every time
+        let mut stmt = conn.prepare_cached(&sql)?;
         let mut rows = stmt.query_map([parent.as_str(), name.as_str()], |r| {
+            // no trim_padded here: sqlite never pads CHAR(n) values (that is
+            // a postgres behavior), and trimming would corrupt real names
+            // ending in spaces
             let v: String = r.get(0)?;
-            Ok(trim_padded(v))
+            Ok(v)
         })?;
         match rows.next() {
             Some(v) => Ok(Some(v?)),
@@ -281,10 +286,10 @@ impl Database for SqliteDb {
     fn list(&self, table: &str, path: &str) -> Result<Vec<String>, Box<dyn Error>> {
         let conn = self.pool.get()?;
         let sql = format!("SELECT name FROM {table} WHERE parent=?1 ORDER BY name");
-        let mut stmt = conn.prepare(&sql)?;
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([path], |r| {
             let v: String = r.get(0)?;
-            Ok(trim_padded(v))
+            Ok(v)
         })?;
         let mut out = Vec::new();
         for row in rows {
@@ -340,44 +345,64 @@ impl PgDb {
     }
 }
 
+impl PgDb {
+    /// Query on a pooled client with one transparent retry: a socket-level
+    /// failure (server restart, dropped connection) discards the client and
+    /// re-runs the query on a fresh connection, so a transient DB blip does
+    /// not surface to FUSE callers as EIO. A server-side SQL error proves the
+    /// connection is alive: the client is kept and the error returned as-is.
+    fn query_retry(
+        &self,
+        sql: &str,
+        params: &[&(dyn postgres::types::ToSql + Sync)],
+    ) -> Result<Vec<postgres::Row>, Box<dyn Error>> {
+        let mut retried = false;
+        loop {
+            let mut client = self.pool.get()?;
+            match client.query(sql, params) {
+                Ok(rows) => return Ok(rows),
+                Err(e) => {
+                    let io = e.as_db_error().is_none();
+                    if io {
+                        client.mark_bad(); // dead socket: reconnect next time
+                    }
+                    if io && !retried {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+}
+
 impl Database for PgDb {
     fn resolve(&self, table: &str, path: &str) -> Result<Option<String>, Box<dyn Error>> {
         if path == "/" {
             return Ok(Some("/".to_string()));
         }
-        let mut client = self.pool.get()?;
         let (parent, name) = crate::paths::split_path(path);
         // char(n) comparisons in postgres work against the trimmed value.
         let sql = format!("SELECT realpath FROM {table} WHERE parent=$1 AND name=$2 LIMIT 1");
-        let rows = match client.query(&sql, &[&parent.as_str(), &name.as_str()]) {
-            Ok(rows) => rows,
-            Err(e) => {
-                // A query error can mean the TCP connection died (e.g. the
-                // server restarted); discard so the next call reconnects.
-                client.mark_bad();
-                return Err(e.into());
-            }
-        };
+        let rows = self.query_retry(&sql, &[&parent.as_str(), &name.as_str()])?;
         if rows.is_empty() {
             return Ok(None);
         }
-        let v: Option<String> = rows[0].get(0);
+        // try_get, not get: a column of an unexpected type would panic inside
+        // the FUSE callback (extern "C" unwinding aborts the whole mount).
+        let v: Option<String> = rows[0].try_get(0)?;
         Ok(v.map(trim_padded))
     }
 
     fn list(&self, table: &str, path: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        let mut client = self.pool.get()?;
         let sql = format!("SELECT name FROM {table} WHERE parent=$1 ORDER BY name");
-        let rows = match client.query(&sql, &[&path]) {
-            Ok(rows) => rows,
-            Err(e) => {
-                client.mark_bad(); // dead connection: reconnect next time
-                return Err(e.into());
-            }
-        };
+        let rows = self.query_retry(&sql, &[&path])?;
         let mut out = Vec::new();
         for row in rows.iter() {
-            let v: Option<String> = row.get(0);
+            // try_get for the same reason as in `resolve`: never panic in a
+            // FUSE callback thread.
+            let v: Option<String> = row.try_get(0)?;
             if let Some(v) = v {
                 out.push(trim_padded(v));
             }
@@ -458,12 +483,16 @@ impl Writer for SqliteWriter {
     fn create(&mut self, table: &str) -> Result<(), Box<dyn Error>> {
         check_ident(table)?;
         self.table = table.to_string();
+        // Index names are database-global in sqlite: the C version's fixed
+        // `index_parent`/`index_id` names made a *second* table in the same
+        // db file fail with "index index_parent already exists". Scope them
+        // per table (check_ident guarantees plain identifier characters).
         self.conn.execute_batch(&format!(
             "DROP TABLE IF EXISTS {table};
              CREATE TABLE {table} (id INTEGER PRIMARY KEY AUTOINCREMENT,parent CHAR(4096),name CHAR(256),realpath CHAR(4096));
-             CREATE INDEX index_id ON {table}(id);
-             CREATE INDEX index_parent ON {table}(parent);
-             CREATE INDEX index_parent_name ON {table}(parent, name);"
+             CREATE INDEX index_{table}_id ON {table}(id);
+             CREATE INDEX index_{table}_parent ON {table}(parent);
+             CREATE INDEX index_{table}_parent_name ON {table}(parent, name);"
         ))?;
         Ok(())
     }
@@ -596,9 +625,11 @@ impl Writer for PgWriter {
         }
         c.execute("COMMIT", &[])?;
         // Two DDL statements -> simple query protocol (see `create`).
+        // Index names are schema-global in postgres too, so scope per table
+        // (same second-table collision as the sqlite writer had).
         c.simple_query(&format!(
-            "CREATE INDEX index_parent ON {table} USING hash(parent);
-                 CREATE INDEX index_parent_name ON {table}(parent,name);"
+            "CREATE INDEX index_{table}_parent ON {table} USING hash(parent);
+                 CREATE INDEX index_{table}_parent_name ON {table}(parent,name);"
         ))?;
         self.rows.clear();
         Ok(())
@@ -615,6 +646,22 @@ impl Writer for PgWriter {
 //   * `{table}|h|<parent>` – a hash mapping name -> realpath (resolve via
 //     HGET, O(1)).
 // ---------------------------------------------------------------------------
+
+/// Percent-encode the userinfo part of a redis URL: a password containing
+/// `@`, `:`, `/` or `%` would otherwise reframe the URL and connect to the
+/// wrong host/db (RFC 3986 unreserved set passes through untouched).
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
 
 fn redis_url(spec: &str) -> String {
     if spec.contains("://") {
@@ -634,7 +681,7 @@ fn redis_url(spec: &str) -> String {
     if pass.is_empty() {
         format!("redis://{host}:{port}/{db}")
     } else {
-        format!("redis://:{pass}@{host}:{port}/{db}")
+        format!("redis://:{}@{host}:{port}/{db}", urlencode(pass))
     }
 }
 
@@ -654,8 +701,14 @@ impl RedisDb {
     pub fn connect(spec: &str) -> Result<Self, Box<dyn Error>> {
         let url = redis_url(spec);
         // Probe once so an unreachable server / bad URL fails at startup.
-        redis::Client::open(url.as_str())?
+        // `get_connection` only opens the TCP socket, so also issue a PING:
+        // without it a wrong password or a NOAUTH server passes the probe
+        // and every mounted operation then fails with EIO, silently.
+        let mut probe = redis::Client::open(url.as_str())?
             .get_connection()
+            .map_err(|e| -> Box<dyn Error> { e.into() })?;
+        let _: String = redis::cmd("PING")
+            .query(&mut probe)
             .map_err(|e| -> Box<dyn Error> { e.into() })?;
         let pool = Pool::new(POOL_MAX, move || {
             let c = redis::Client::open(url.as_str()).map_err(|e| e.to_string())?;
@@ -664,20 +717,39 @@ impl RedisDb {
         Ok(Self { pool })
     }
 
-    fn zrange(&self, key: &str) -> Result<Vec<String>, Box<dyn Error>> {
-        let mut conn = self.pool.get()?;
-        let r: Result<Vec<String>, redis::RedisError> = redis::cmd("ZRANGE")
-            .arg(key)
-            .arg(0)
-            .arg(-1)
-            .query(&mut *conn);
-        match r {
-            Ok(names) => Ok(names),
-            Err(e) => {
-                conn.mark_bad(); // dead socket: reconnect on next checkout
-                Err(e.into())
+    /// Run one redis command with one transparent retry, mirroring
+    /// `PgDb::query_retry`: a socket failure (server restart) discards the
+    /// pooled connection and re-runs the command on a fresh one, so a blip
+    /// does not surface as EIO; any other reply error keeps the (healthy)
+    /// connection and propagates.
+    fn cmd_retry<T>(&self, cmd: &mut redis::Cmd) -> Result<T, Box<dyn Error>>
+    where
+        T: redis::FromRedisValue,
+    {
+        let mut retried = false;
+        loop {
+            let mut conn = self.pool.get()?;
+            match cmd.query::<T>(&mut *conn) {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    let io = e.is_io_error();
+                    if io {
+                        conn.mark_bad(); // dead socket: reconnect next time
+                    }
+                    if io && !retried {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
             }
         }
+    }
+
+    fn zrange(&self, key: &str) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut cmd = redis::cmd("ZRANGE");
+        cmd.arg(key).arg(0).arg(-1);
+        self.cmd_retry(&mut cmd)
     }
 }
 
@@ -687,18 +759,9 @@ impl Database for RedisDb {
             return Ok(Some("/".to_string()));
         }
         let (parent, name) = paths::split_path(path);
-        let mut conn = self.pool.get()?;
-        let r: Result<Option<String>, redis::RedisError> = redis::cmd("HGET")
-            .arg(hash_key(table, &parent))
-            .arg(name)
-            .query(&mut *conn);
-        match r {
-            Ok(rp) => Ok(rp),
-            Err(e) => {
-                conn.mark_bad(); // dead socket: reconnect on next checkout
-                Err(e.into())
-            }
-        }
+        let mut cmd = redis::cmd("HGET");
+        cmd.arg(hash_key(table, &parent)).arg(name);
+        self.cmd_retry(&mut cmd)
     }
 
     fn list(&self, table: &str, path: &str) -> Result<Vec<String>, Box<dyn Error>> {

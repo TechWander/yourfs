@@ -114,7 +114,8 @@ unsafe extern "C" fn yourfs_readlink(path: *const c_char, buf: *mut c_char, size
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf as *mut u8, n);
             if n < size {
                 *buf.add(n) = 0;
-            } else {
+            } else if size > 0 {
+                // size == 0 must not reach `size - 1` (usize wrap -> wild ptr)
                 *buf.add(size - 1) = 0;
             }
             0
@@ -148,6 +149,11 @@ unsafe extern "C" fn yourfs_read(
     offset: off_t,
     fi: *mut fuse_file_info,
 ) -> c_int {
+    if size == 0 {
+        // nothing to read; also keeps from_raw_parts_mut off a possibly-null
+        // buf with len 0 (a null data pointer is UB even for 0-length slices)
+        return 0;
+    }
     let nfsfh = (*fi).fh as *mut crate::libnfs::nfsfh;
     let slice = std::slice::from_raw_parts_mut(buf as *mut u8, size);
     match nfs::pread(nfsfh, offset as u64, slice, caller()) {

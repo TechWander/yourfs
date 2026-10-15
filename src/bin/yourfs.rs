@@ -5,13 +5,14 @@ use std::ffi::CString;
 
 use yourfs::{cli, db, fs, key, libnfs, nfscli, paths};
 
+// Numeric options and the URL `uid=`/`gid=` override follow C atoi()/atof()
+// semantics (longest numeric prefix), see `cli::parse_i64`/`cli::parse_f64`.
 fn parse_i64(s: &str) -> i64 {
-    // C atoi()/atof() semantics: leading spaces ok, garbage -> 0.
-    s.trim().parse::<i64>().unwrap_or(0)
+    cli::parse_i64(s)
 }
 
 fn parse_f64(s: &str) -> f64 {
-    s.trim().parse::<f64>().unwrap_or(0.0)
+    cli::parse_f64(s)
 }
 
 struct Opts {

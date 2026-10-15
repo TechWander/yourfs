@@ -47,35 +47,39 @@ fn main() {
     let nfs = static_archive("libnfs.a", musl);
     let fuse = static_archive("libfuse.a", musl);
 
-    if !(force_dynamic && !musl) && nfs.is_some() && fuse.is_some() {
-        // --whole-archive is REQUIRED here: libnfs registers its RPC
-        // transport backends via __attribute__((constructor)) in object files
-        // that are never referenced directly. Without it the linker drops
-        // those objects, the constructors never run, and every NFS operation
-        // hangs at runtime.
-        println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-        println!("cargo:rustc-link-arg={}", nfs.unwrap().display());
-        println!("cargo:rustc-link-arg={}", fuse.unwrap().display());
-        println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
-        // glibc keeps pthread/dl/m as separate libraries that libfuse/libnfs
-        // reference; musl folds them all into libc, so nothing extra is
-        // needed there (and -lpthread/-ldl would not even resolve).
-        if musl {
-            // Fully static link is single-pass, and the sysroot already placed
-            // its `-lc` before our archives. Re-scan libc afterwards so the
-            // symbols our --whole-archive objects pull in (perror, mount,
-            // pthread_getspecific, vmsplice, ...) get resolved.
-            println!("cargo:rustc-link-arg=-lc");
-        } else {
-            println!("cargo:rustc-link-arg=-lpthread");
-            println!("cargo:rustc-link-arg=-ldl");
-            println!("cargo:rustc-link-arg=-lm");
+    if !(force_dynamic && !musl) {
+        if let (Some(nfs), Some(fuse)) = (nfs.as_ref(), fuse.as_ref()) {
+            // --whole-archive is REQUIRED here: libnfs registers its RPC
+            // transport backends via __attribute__((constructor)) in object files
+            // that are never referenced directly. Without it the linker drops
+            // those objects, the constructors never run, and every NFS operation
+            // hangs at runtime.
+            println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+            println!("cargo:rustc-link-arg={}", nfs.display());
+            println!("cargo:rustc-link-arg={}", fuse.display());
+            println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+            // glibc keeps pthread/dl/m as separate libraries that libfuse/libnfs
+            // reference; musl folds them all into libc, so nothing extra is
+            // needed there (and -lpthread/-ldl would not even resolve).
+            if musl {
+                // Fully static link is single-pass, and the sysroot already placed
+                // its `-lc` before our archives. Re-scan libc afterwards so the
+                // symbols our --whole-archive objects pull in (perror, mount,
+                // pthread_getspecific, vmsplice, ...) get resolved.
+                println!("cargo:rustc-link-arg=-lc");
+            } else {
+                println!("cargo:rustc-link-arg=-lpthread");
+                println!("cargo:rustc-link-arg=-ldl");
+                println!("cargo:rustc-link-arg=-lm");
+            }
+            return;
         }
-        return;
     }
 
     println!("cargo:warning=static libnfs/libfuse not found; linking dynamically");
-    for (lib, pkg) in [("fuse", "fuse"), ("libnfs", "libnfs")] {
+    // (link name, pkg-config name): `-l` takes the short form, so libnfs.so
+    // is `-lnfs` (writing `-llibnfs` would make ld look for liblibnfs.so).
+    for (lib, pkg) in [("fuse", "fuse"), ("nfs", "libnfs")] {
         if pkg_config::probe_library(pkg).is_err() {
             println!("cargo:rustc-link-arg=-l{lib}");
         }

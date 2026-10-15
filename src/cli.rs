@@ -4,6 +4,71 @@
 
 use std::collections::VecDeque;
 
+/// C `atoi()` semantics: skip leading spaces, take the longest numeric
+/// prefix (`1000&gid=2000` -> 1000), garbage -> 0. A whole-string
+/// `parse::<i64>()` would turn such prefixes into 0 (= root uid!), which
+/// is why the URL `uid=`/`gid=` override must not use it directly.
+pub fn parse_i64(s: &str) -> i64 {
+    let t = s.trim_start();
+    let b = t.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let digits = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    if digits == i {
+        return 0;
+    }
+    t[..i].parse::<i64>().unwrap_or(0)
+}
+
+/// C `atof()` semantics: longest parseable floating prefix (`10.5MB`
+/// -> 10.5), garbage -> 0.
+pub fn parse_f64(s: &str) -> f64 {
+    let t = s.trim_start();
+    let b = t.as_bytes();
+    let mut i = 0;
+    if i < b.len() && (b[i] == b'+' || b[i] == b'-') {
+        i += 1;
+    }
+    let int_start = i;
+    while i < b.len() && b[i].is_ascii_digit() {
+        i += 1;
+    }
+    let frac_start = i;
+    if i < b.len() && b[i] == b'.' {
+        i += 1;
+        while i < b.len() && b[i].is_ascii_digit() {
+            i += 1;
+        }
+    }
+    // need at least one digit before or after the dot
+    if int_start == frac_start && i == frac_start {
+        return 0.0;
+    }
+    // optional exponent, but only if it actually has digits: "1e" -> 1.0
+    if i < b.len() && (b[i] | 0x20) == b'e' {
+        let save = i;
+        let mut j = i + 1;
+        if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
+            j += 1;
+        }
+        let exp_digits = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j != exp_digits {
+            i = j;
+        } else {
+            i = save;
+        }
+    }
+    t[..i].parse::<f64>().unwrap_or(0.0)
+}
+
 pub struct OptSpec {
     pub short: char,
     pub long: &'static str,
@@ -143,6 +208,34 @@ impl Parser {
         // ---- first positional argument ends option processing (glibc default) ----
         self.done = true;
         self.next_command()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_f64, parse_i64};
+
+    #[test]
+    fn atoi_prefix_semantics() {
+        assert_eq!(parse_i64("1000"), 1000);
+        assert_eq!(parse_i64("  42x"), 42);
+        assert_eq!(parse_i64("1000&gid=2000"), 1000);
+        assert_eq!(parse_i64("-7abc"), -7);
+        assert_eq!(parse_i64("abc"), 0);
+        assert_eq!(parse_i64(""), 0);
+        assert_eq!(parse_i64("+"), 0);
+        assert_eq!(parse_i64("99999999999999999999999"), 0); // overflow -> like atoi's garbage, clamped to 0 via parse fail
+    }
+
+    #[test]
+    fn atof_prefix_semantics() {
+        assert_eq!(parse_f64("10.5"), 10.5);
+        assert_eq!(parse_f64("10.5MB"), 10.5);
+        assert_eq!(parse_f64(".5x"), 0.5);
+        assert_eq!(parse_f64("1e3"), 1000.0);
+        assert_eq!(parse_f64("1e"), 1.0);
+        assert_eq!(parse_f64("xyz"), 0.0);
+        assert_eq!(parse_f64("-"), 0.0);
     }
 }
 

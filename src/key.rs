@@ -63,3 +63,27 @@ pub fn key_is_good(key: &str) -> bool {
     let expiry = string_to_time(DATES[idx]).unwrap_or(0);
     now <= expiry
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{days_from_civil, key_is_good, string_to_time};
+
+    #[test]
+    fn days_from_civil_known_epoch_days() {
+        // guards the `if .. else .. / 400` precedence: if the division ever
+        // binds only to the else block these values go wildly wrong
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11017);
+        assert_eq!(days_from_civil(2027, 1, 1), 20819);
+    }
+
+    #[test]
+    fn expiry_values() {
+        assert_eq!(string_to_time("2027-01-01 00:00:00"), Some(20819 * 86400));
+        assert_eq!(string_to_time("1970-01-01 00:00:00"), Some(0));
+        assert_eq!(string_to_time("garbage"), None);
+        // first key valid until 2027, unknown keys never valid
+        assert!(key_is_good("FADEP8"));
+        assert!(!key_is_good("NOPE"));
+    }
+}
