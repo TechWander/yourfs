@@ -267,8 +267,10 @@ fn main() {
     let export_c = unsafe { std::ffi::CStr::from_ptr(export) }.to_owned();
     unsafe { libnfs::nfs_destroy_url(urls) };
 
-    // `nfs` is the already-mounted first context; nfscli::init opens a few
-    // more alongside it so FUSE worker threads can issue NFS calls in parallel.
+    // `nfs` is the already-mounted first context, now owned by the pool:
+    // nfscli::init stores it in slot 0 and opens a few more alongside it so
+    // FUSE worker threads can issue NFS calls in parallel. Do not destroy it
+    // here; nfscli::shutdown() tears down every pooled context after the loop.
     nfscli::init(
         nfs,
         &server_c,
@@ -286,7 +288,8 @@ fn main() {
     eprintln!("Starting fuse_main()");
     let ret = fs::run(&ctx, o.custom_uid as i32, o.custom_gid as i32, &mut argv_c);
 
-    unsafe { libnfs::nfs_destroy_context(nfs) };
+    // Gracefully free every pooled NFS context (slot 0 owns `nfs`).
+    nfscli::shutdown();
     std::process::exit(ret);
 }
 

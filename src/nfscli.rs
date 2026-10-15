@@ -129,6 +129,33 @@ pub fn init(
     });
 }
 
+/// Tear down every pooled context, freeing the connections opened by `init`
+/// (the first caller-supplied one plus each extra mount). Call exactly once
+/// after the FUSE main loop returns, when no callback can touch the pool any
+/// more. Each context is destroyed while holding its own slot lock so nothing
+/// can be mid-operation on it; the pointer is then nulled so a stray later
+/// call cannot double-free. This also means slot 0 (the caller's original
+/// context) is owned by the pool from `init` on and must NOT be destroyed
+/// separately.
+pub fn shutdown() {
+    let Some(p) = NFS.get() else { return };
+    for slot in &p.slots {
+        let mut s = match slot.lock() {
+            Ok(g) => g,
+            // A poisoned slot lock means a callback panicked while holding it;
+            // we still own the context pointer and must free it.
+            Err(e) => e.into_inner(),
+        };
+        if !s.ctx.is_null() {
+            unsafe { nfs_destroy_context(s.ctx) };
+            s.ctx = std::ptr::null_mut();
+        }
+    }
+    if let Ok(mut m) = p.open_files.lock() {
+        m.clear();
+    }
+}
+
 /// Borrow a context, preferring one that is already idle. Starts at a rotating
 /// index and `try_lock`s each slot; if every context is busy it blocks on the
 /// round-robin pick so no thread starves. Returns the slot index (so handle
@@ -346,8 +373,9 @@ pub fn pread(
     Ok(status as usize)
 }
 
-/// The C version neither resolved the virtual path nor touched
-/// credentials for statvfs; kept as-is for behavioral parity.
+/// `nfs_statvfs_async` on an already-resolved path. The caller (fs.rs) does
+/// the virtual->real resolution; no RPC credentials are set here because an
+/// NFS statfs is superblock-wide and path-content independent.
 pub fn statvfs(path: &str) -> Result<NfsStatvfs, i32> {
     let cpath = to_cstring(path);
     let svfs = Box::into_raw(Box::new(NfsStatvfs::default()));

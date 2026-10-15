@@ -193,7 +193,20 @@ unsafe extern "C" fn yourfs_readdir(
 
 unsafe extern "C" fn yourfs_statfs(path: *const c_char, stbuf: *mut Statvfs) -> c_int {
     let vpath = paths::from_nul(path);
-    match nfs::statvfs(&vpath) {
+    // Resolve virtual -> real like getattr/open/readlink so `df` on a renamed
+    // (isolated) directory queries its actual location instead of a path that
+    // does not exist on the export.
+    let ctx = db();
+    let real = if vpath == "/" {
+        "/".to_string()
+    } else {
+        match ctx.db.resolve(&ctx.table, &vpath) {
+            Ok(Some(r)) => r,
+            Ok(None) => return -libc::ENOENT,
+            Err(_) => return -libc::EIO,
+        }
+    };
+    match nfs::statvfs(&real) {
         Ok(sv) => {
             *stbuf = sv;
             0

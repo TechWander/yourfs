@@ -224,6 +224,11 @@ pub extern "C" fn read_cb(
         return;
     }
     unsafe {
-        std::ptr::copy_nonoverlapping(data as *const u8, cb.return_data as *mut u8, status as usize);
+        // Bound the copy by the buffer we handed in (`max_size`), never trust
+        // `status` alone: a short/over-long reply must not run past the buffer.
+        let n = (status as usize).min(cb.max_size);
+        std::ptr::copy_nonoverlapping(data as *const u8, cb.return_data as *mut u8, n);
+        // Report the byte count we actually delivered so it matches the buffer.
+        cb.status = n as c_int;
     }
 }

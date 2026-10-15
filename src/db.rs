@@ -201,7 +201,11 @@ impl Database for CachingDb {
     }
 }
 
-pub trait Database: Send {
+/// Shared by reference across the concurrent FUSE worker threads (via the
+/// `DbPtr` static), so the trait must be `Sync`, not just `Send`. Without it
+/// `&dyn Database` is not `Sync` and `CachingDb` (which owns a
+/// `Box<dyn Database>`) would not be auto-`Sync` either.
+pub trait Database: Send + Sync {
     /// Real path of the virtual `path`, or None when it is not whitelisted.
     fn resolve(&self, table: &str, path: &str) -> Result<Option<String>, Box<dyn Error>>;
 
