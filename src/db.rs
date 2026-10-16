@@ -199,6 +199,10 @@ impl Database for CachingDb {
             .insert(path.to_string(), v.clone());
         Ok(v)
     }
+
+    fn check_table(&self, table: &str) -> Result<(), Box<dyn Error>> {
+        self.inner.check_table(table)
+    }
 }
 
 /// Shared by reference across the concurrent FUSE worker threads (via the
@@ -212,6 +216,12 @@ pub trait Database: Send + Sync {
     /// Names of the direct children of directory `path`, sorted like the
     /// original `... WHERE parent='<path>' order by name` queries.
     fn list(&self, table: &str, path: &str) -> Result<Vec<String>, Box<dyn Error>>;
+
+    /// Startup validation that `table` actually exists and is queryable.
+    /// Without it a typo'd `-Z` (or a freshly auto-created empty sqlite
+    /// file) mounts "successfully" and then fails with a mystery EIO on
+    /// the very first `ls`, because the query only errors at runtime.
+    fn check_table(&self, table: &str) -> Result<(), Box<dyn Error>>;
 }
 
 /// Reject anything that is not a plain identifier before interpolating the
@@ -241,6 +251,15 @@ impl SqliteDb {
     /// Open the db file and apply the cache_size pragma
     /// (`-M <MB>` -> `cache_size = MB*1000` KB pages, as in the C version).
     pub fn open(path: &str, cache_kb: i64) -> Result<Self, Box<dyn Error>> {
+        // `Connection::open` CREATES a missing file; a reader must never do
+        // that — an empty auto-created db passes the probe and every mount
+        // operation then fails with EIO. The db is built by yourfs-tool.
+        if !std::path::Path::new(path).exists() {
+            return Err(format!(
+                "sqlite database '{path}' does not exist (build it with yourfs-tool -F sqlite3 -X {path} -i input.txt)"
+            )
+            .into());
+        }
         // One eager open so a bad path surfaces at startup rather than on the
         // first request; the pool reconnects lazily with the same settings.
         let probe = Connection::open(path)?;
@@ -296,6 +315,17 @@ impl Database for SqliteDb {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn check_table(&self, table: &str) -> Result<(), Box<dyn Error>> {
+        // preparing proves the table exists without touching any row; map
+        // sqlite's raw message into an actionable one
+        let conn = self.pool.get()?;
+        let sql = format!("SELECT name FROM {table} LIMIT 1");
+        conn.prepare(&sql).map_err(|e| -> Box<dyn Error> {
+            format!("table '{table}' is not usable in this sqlite database ({e}; build it with yourfs-tool)").into()
+        })?;
+        Ok(())
     }
 }
 
@@ -408,6 +438,20 @@ impl Database for PgDb {
             }
         }
         Ok(out)
+    }
+
+    fn check_table(&self, table: &str) -> Result<(), Box<dyn Error>> {
+        // to_regclass folds unquoted identifiers exactly like the runtime
+        // queries do, so this probe accepts the same names
+        let rows = self.query_retry("SELECT to_regclass($1)", &[&table])?;
+        let v: Option<String> = rows.first().map(|r| r.try_get(0)).transpose()?.flatten();
+        if v.is_none() {
+            return Err(format!(
+                "table '{table}' does not exist in this postgres database (build it with yourfs-tool)"
+            )
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -766,6 +810,30 @@ impl Database for RedisDb {
 
     fn list(&self, table: &str, path: &str) -> Result<Vec<String>, Box<dyn Error>> {
         self.zrange(&dir_key(table, path))
+    }
+
+    fn check_table(&self, table: &str) -> Result<(), Box<dyn Error>> {
+        // any `{table}|*` key proves yourfs-tool populated this table; an
+        // empty keyspace means a wrong -Z or a database that was never
+        // built. Same SCAN/loop pattern as RedisWriter::create, stopping
+        // at the first hit.
+        let pattern = format!("{table}|*");
+        let mut cursor: u64 = 0;
+        loop {
+            let mut cmd = redis::cmd("SCAN");
+            cmd.arg(cursor).arg("MATCH").arg(&pattern).arg("COUNT").arg(1000);
+            let (next, keys): (String, Vec<String>) = self.cmd_retry(&mut cmd)?;
+            if !keys.is_empty() {
+                return Ok(());
+            }
+            cursor = next.parse()?;
+            if cursor == 0 {
+                return Err(format!(
+                    "no keys for table '{table}' in this redis database (build it with yourfs-tool)"
+                )
+                .into());
+            }
+        }
     }
 }
 

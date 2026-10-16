@@ -79,7 +79,7 @@ fn main() {
         cache_memory: 10000,
         whitelist_cache: false,
         nfs_connections: nfscli::DEFAULT_POOL_SIZE,
-        your_key: String::from("FADEP8"),
+        your_key: key::DEFAULT_KEY.to_string(),
         fuse_opts: Vec::new(),
         unknown: None,
     };
@@ -195,6 +195,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Fail fast when -Z names an unusable table: without this probe a typo
+    // or an empty database mounts "fine" and every operation returns a
+    // mystery EIO (sqlite even auto-created a missing -X file until
+    // SqliteDb::open learned to refuse that).
+    if let Err(e) = database.check_table(&o.table) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     // Opt-in read-through cache: only for mounts where the whitelist is known
     // to stay static (see `db::CachingDb`).
     let database = if o.whitelist_cache {

@@ -20,6 +20,12 @@
 
 set -euo pipefail
 
+# Resolve the repo root NOW: the libfuse/libnfs sections below `cd` into
+# $WORK, and a relative `$0` (e.g. `bash scripts/build-musl-static.sh`) would
+# no longer resolve from there — `dirname $0` becomes a path relative to the
+# build tree and the final `cd` fails on a cold cache.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 FUSE_VER="${FUSE_VER:-2.9.9}"
 NFS_REF="${NFS_REF:-libnfs-4.0.0}"
 WORK="${WORK:-/tmp/yourfs-muslbuild}"
@@ -64,7 +70,7 @@ if [ ! -f "$OUT/libnfs.a" ]; then
 fi
 
 # ---- yourfs (musl, fully static) ----
-cd "$(dirname "$0")/.."
+cd "$ROOT"
 YOURFS_LIB_PATH="$OUT" cargo build --release --target x86_64-unknown-linux-musl
 
 B="target/x86_64-unknown-linux-musl/release"

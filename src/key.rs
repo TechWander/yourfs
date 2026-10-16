@@ -9,11 +9,15 @@ const KEYS: [&str; 10] = [
     "SD76RD",
 ];
 
+/// The key a mount uses when `-y` is not given: always the first entry of
+/// `KEYS`, so the default cannot drift out of sync with the table.
+pub const DEFAULT_KEY: &str = KEYS[0];
+
 /// Expiry of each key, as days since the unix epoch parsed from
 /// `"%Y-%m-%d %H:%M:%S"` strings in the C version (local time there; the
 /// date boundaries involved make the distinction immaterial here).
 const DATES: [&str; 10] = [
-    "2027-01-01 00:00:00",
+    "2029-01-01 00:00:00",
     "2028-01-01 00:00:00",
     "2029-01-01 00:00:00",
     "2030-01-01 00:00:00",
@@ -66,7 +70,7 @@ pub fn key_is_good(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{days_from_civil, key_is_good, string_to_time};
+    use super::{days_from_civil, key_is_good, string_to_time, DEFAULT_KEY};
 
     #[test]
     fn days_from_civil_known_epoch_days() {
@@ -82,8 +86,10 @@ mod tests {
         assert_eq!(string_to_time("2027-01-01 00:00:00"), Some(20819 * 86400));
         assert_eq!(string_to_time("1970-01-01 00:00:00"), Some(0));
         assert_eq!(string_to_time("garbage"), None);
-        // first key valid until 2027, unknown keys never valid
+        // first key (also the default) valid until 2029, unknown keys never valid
         assert!(key_is_good("FADEP8"));
+        assert_eq!(DEFAULT_KEY, "FADEP8");
+        assert!(key_is_good(DEFAULT_KEY));
         assert!(!key_is_good("NOPE"));
     }
 }
