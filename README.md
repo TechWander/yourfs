@@ -124,6 +124,74 @@ The database named by `-X`/`-Z` must already be built (steps 1–2): `yourfs`
 validates the table at startup and exits with an actionable message instead of
 mounting a view where every access would fail with `EIO`.
 
+## Worked example
+
+Publish part of an export, with different names, and change your mind later:
+
+```
+NFS server export /srv/data                user sees /mnt/yourfs
+├── public/welcome.txt          ────►      ├── welcome.txt
+├── internal/2025/report.pdf               └── reports/
+└── secret/keys.txt  (not listed)               └── report.pdf
+```
+
+**1. Describe the tree** — one line per entry, whitespace-separated
+`parent name realpath` (paths are export-root-relative, leading `/`;
+`secret/keys.txt` simply has no line, so it cannot exist in the view):
+
+```
+/          welcome.txt    /public/welcome.txt
+/          reports        /internal/2025
+/reports   report.pdf     /internal/2025/report.pdf
+```
+
+A directory is just a row too (`/ reports /internal/2025`); its children
+reference it through `parent` — and note `parent` is the **virtual** path, so
+`/reports` may alias the server's `/internal/2025` (verified: `ls` shows
+`reports` as a directory, `cat` reads through).
+
+**2. Build the whitelist** (scan automates step 1 for a whole tree, then hand-edit):
+
+```bash
+yourfs-tool -s /srv/data -o list.txt     # or start from a hand-written file
+yourfs-tool -F sqlite3 -X /srv/data.db -Z data -i list.txt
+```
+
+> An import **replaces** everything for that table: `DROP TABLE` + reload
+> (Redis: `SCAN`+`DEL {table}|*` + rewrite). Rows added or edited after the
+> import are gone on the next one.
+
+**3. Mount and read** (`-y` may be omitted — see [License key](#license-key)):
+
+```bash
+yourfs -n nfs://<server>/srv/data -m /mnt/yourfs -F sqlite3 -X /srv/data.db -Z data
+ls /mnt/yourfs        # reports  welcome.txt
+```
+
+### Changing the virtual tree while mounted
+
+Every operation reads the live database, so edits take effect on the very next
+`ls`/`open` — no remount (unless you mounted with `-w`; then the cache holds
+the old answer until you restart `yourfs`).
+
+```sql
+-- publish another file right now
+INSERT INTO data(parent,name,realpath) VALUES ('/','keys.txt','/secret/keys.txt');
+-- rename what users see (row stays the same file)
+UPDATE data SET name='welcome-v2.txt' WHERE name='welcome.txt';
+-- revoke a file
+DELETE FROM data WHERE name='keys.txt';
+```
+
+(Redis instead: publish = `ZADD data|d|/ <name>` **and** `HSET data|h|/ <name>
+<realpath>`; revoke = the matching `ZREM` + `HDEL`. PostgreSQL: same SQL, via
+`psql` — but beware its `CHAR` columns ignore trailing spaces in comparisons,
+so never end a name or path with one.)
+
+For a wholesale reshuffle prefer editing the list file and re-importing while
+the mount is idle — re-import first drops the table, and a read landing in
+that window gets an error.
+
 ## Options
 
 **`yourfs`**

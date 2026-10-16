@@ -112,6 +112,69 @@ umount /mnt/yourfs    # 或 fusermount -u /mnt/yourfs
 `-X`/`-Z` 指向的数据库必须已经建好（上面第 1–2 步）：`yourfs` 启动时会校验表，
 失败即带着明确原因退出，而不是挂出一个每次访问都报 `EIO` 的视图。
 
+## 完整案例
+
+只发布导出目录的一部分、换个名字展示，并且事后随时改主意：
+
+```
+NFS 服务端导出 /srv/data                  用户看到 /mnt/yourfs
+├── public/welcome.txt          ────►      ├── welcome.txt
+├── internal/2025/report.pdf               └── reports/
+└── secret/keys.txt（未列入白名单）              └── report.pdf
+```
+
+**1. 描述虚拟树**——每条目一行，以空白分隔的 `parent name realpath`
+（路径相对导出根目录、以 `/` 开头；`secret/keys.txt` 没有对应行，于是在视图里
+彻底不存在）：
+
+```
+/          welcome.txt    /public/welcome.txt
+/          reports        /internal/2025
+/reports   report.pdf     /internal/2025/report.pdf
+```
+
+目录也是一行（`/ reports /internal/2025`），子项靠 `parent` 指向它——注意
+`parent` 是**虚拟**路径，所以 `/reports` 可以是服务端 `/internal/2025` 的别名
+（已实测：`ls` 里 `reports` 显示为目录，`cat` 能直接读到文件）。
+
+**2. 生成白名单**（整棵树的场景先用扫描代替手写第 1 步，再手工裁剪）：
+
+```bash
+yourfs-tool -s /srv/data -o list.txt     # 也可以直接从手写文件开始
+yourfs-tool -F sqlite3 -X /srv/data.db -Z data -i list.txt
+```
+
+> 导入是**整表替换**：先 `DROP TABLE` 再全量重建（Redis 则是 `SCAN`+`DEL
+> {table}|*` 后重写）。导入之后在数据库里手工加改的行，下次导入时会被清掉。
+
+**3. 挂载读取**（`-y` 可省略，默认密钥见 [License key](#license-key)）：
+
+```bash
+yourfs -n nfs://<server>/srv/data -m /mnt/yourfs -F sqlite3 -X /srv/data.db -Z data
+ls /mnt/yourfs        # reports  welcome.txt
+```
+
+### 挂载期间修改虚拟目录
+
+每次操作都读实时数据库，所以改表后**下一次 `ls`/打开立即生效**，无需重新挂载
+（除非挂载时开了 `-w`：缓存会继续供旧答案，需重启 `yourfs`）。
+
+```sql
+-- 立即多发布一个文件
+INSERT INTO data(parent,name,realpath) VALUES ('/','keys.txt','/secret/keys.txt');
+-- 改用户看到的名字（指向的还是同一个文件）
+UPDATE data SET name='welcome-v2.txt' WHERE name='welcome.txt';
+-- 下架一个文件
+DELETE FROM data WHERE name='keys.txt';
+```
+
+Redis 则用：发布 = `ZADD data|d|/ <name>` **加** `HSET data|h|/ <name>
+<realpath>`；下架 = 对应的 `ZREM` + `HDEL`。PostgreSQL 同上走 `psql`——但注意
+它的 `CHAR` 列比较时会忽略尾部空格，名字/路径末尾不要带空格。
+
+若要大改结构，更稳的做法是改列表文件后重新导入，并选在挂载空载时进行——
+导入会先删表，这个窗口期内落到的读操作会报错。
+
 ## 命令行选项
 
 **`yourfs`**
