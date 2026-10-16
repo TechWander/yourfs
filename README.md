@@ -68,7 +68,9 @@ not need to install libnfs/libfuse packages** to run the result — the only dyn
 dependencies left are the glibc base libraries, present on every Linux.
 
 Set `YOURFS_DYNAMIC=1` to force dynamic linking, or `YOURFS_LIB_PATH=<dir>` to point
-at specific `.a` files.
+at specific `.a` files. (`YOURFS_LIB_PATH` is mandatory when building the musl
+target by hand: without it `build.rs` falls back to shared libraries and the
+result is *not* fully static.)
 
 ### Fully static (musl) build — runs on musl/Alpine too
 
@@ -78,9 +80,19 @@ at specific `.a` files.
 ```
 
 The script rebuilds libfuse and libnfs against musl and links everything into a
-single ELF with **zero dynamic dependencies** (`ldd` reports *statically linked*).
-See [Deployment](#deployment-and-runtime-requirements) for what the target machine
-still needs for FUSE itself.
+single ELF with **zero dynamic dependencies** (`ldd` reports *statically linked*,
+no `INTERP` segment; `file` calls such static-PIE ELFs "dynamically linked" —
+trust `ldd`/`readelf`). See [Deployment](#deployment-and-runtime-requirements)
+for what the target machine still needs for FUSE itself.
+
+### Prebuilt binaries
+
+GitHub Releases ship two x86_64 Linux archives plus `SHA256SUMS.txt`:
+
+* `yourfs-<ver>-linux-x86_64-gnu.tar.gz` — glibc build (needs glibc ≥ 2.30);
+* `yourfs-<ver>-linux-x86_64-musl.tar.gz` — fully static, no shared libraries.
+
+Each contains `yourfs` and `yourfs-tool`.
 
 ## Quick start
 
@@ -100,16 +112,28 @@ ls /mnt/yourfs        # only whitelisted entries are visible
 umount /mnt/yourfs    # or: fusermount -u /mnt/yourfs
 ```
 
+**`-n` URL format.** libnfs requires a path after the host: `nfs://host` alone
+is rejected with *Incomplete or invalid URL specified* — for a root export you
+must write `nfs://host/`. A **trailing slash is not required** otherwise:
+`nfs://host/srv/nfs/export` and `nfs://host/srv/nfs/export/` both mount and
+read identically (verified against a live server). Cloud NAS mount targets
+(e.g. `nfs://xxx.cn-beijing.nas.aliyuncs.com/`) are root exports, which is why
+they always carry that one slash.
+
+The database named by `-X`/`-Z` must already be built (steps 1–2): `yourfs`
+validates the table at startup and exits with an actionable message instead of
+mounting a view where every access would fail with `EIO`.
+
 ## Options
 
 **`yourfs`**
 
 | option | meaning |
 |--------|---------|
-| `-n <url>` | NFS export to mount, e.g. `nfs://host/path` (**required**) |
+| `-n <url>` | NFS export to mount: `nfs://host/path` (**required**; a path after the host is mandatory — use `nfs://host/` for a root export; trailing slash otherwise optional) |
 | `-m <path>` | local mount point (**required**, implied read-only) |
 | `-F <type>` | whitelist backend: `sqlite3` \| `postgres` \| `redis` |
-| `-X <db>` | backend connection string (see table above) |
+| `-X <db>` | backend connection string (see table above); for sqlite3 the file must exist — `yourfs` never creates it |
 | `-Z <table>` | whitelist table / key prefix |
 | `-M <MB>` | SQLite page cache size (default 10) |
 | `-w` | cache the whitelist in memory (opt-in; enable only if it will not change during the mount) |
@@ -152,17 +176,19 @@ Beyond that:
 ## License key
 
 Like the original C project, `yourfs` gates mounting behind a built-in license
-key (`-y`). A handful of keys are compiled in with expiry dates; the default `FADEP8`
-is valid until 2027. This is a legacy feature carried over verbatim and is *not*
-real access control — the whitelist database is.
+key (`-y`). A handful of keys are compiled in with expiry dates; the default
+when `-y` is omitted is always the **first key of the table**, currently
+`FADEP8`, valid until 2029. This is a legacy feature carried over verbatim and
+is *not* real access control — the whitelist database is.
 
 ## Testing note
 
 `yourfs` interacts with FUSE, the kernel and a live NFS server, so a unit test
 alone proves very little. The end-to-end behaviour (whitelist isolation, symlink
-resolution, `EROFS` on write, `statfs`, clean unmount) was verified on a real
-local NFS export for both the SQLite3 and Redis backends, on the glibc **and**
-the fully static musl release binaries.
+resolution, `EROFS` on write, `statfs`, connection-loss recovery, clean
+unmount) was verified on a real local NFS export for all three backends
+(SQLite3, PostgreSQL, Redis via docker), on the glibc **and** the fully static
+musl release binaries.
 
 ## Design notes
 
@@ -177,15 +203,18 @@ the fully static musl release binaries.
   connection from a small fixed-size pool instead of queueing on a single mutex.
   Nothing is cached by default: every operation reads the live database, so a row
   added, edited or revoked externally takes effect immediately.
-* **Parallel NFS too.** `libnfs` contexts are single-connection and not
-  thread-safe, so instead of one mutex-guarded context the client keeps a small
-  pool of independently mounted contexts, each behind its own lock; an operation
-  runs on whichever context is idle. Because `nfs_open` returns a handle bound
-  to the context that created it, `pread`/`close` are routed back to that same
-  context (tracked in an internal map). The lock order is strictly map-then-slot
-  or slot-released-then-map — never nested — so it stays deadlock-free. The number
-  of contexts is tunable with `-V <N>` (default 4; `-V 1` reverts to a single
-  connection).
+* **Parallel NFS with request pipelining.** A `libnfs` context is one TCP
+  connection and not thread-safe, so each pooled context is owned by a
+  dedicated service thread (actor model): FUSE workers hand operations to a
+  slot through a channel and wait on a private reply, and the actor issues
+  *everything queued* back-to-back — several READs then ride a single round
+  trip (measured 5.3× faster than a serialising design on a 10 ms-latency
+  link). Because `nfs_open` returns a handle bound to the context that
+  created it, `pread`/`close` are routed back to the owning slot (tracked in
+  an internal map; the lock order never nests, so no deadlocks). Actors start
+  lazily: libfuse daemonises by forking inside `fuse_main`, and a thread
+  created before that fork would not survive it. The number of contexts is
+  tunable with `-V <N>` (default 4; `-V 1` is a single pipelined connection).
 * **Opt-in whitelist cache (`-w`).** When enabled, resolved paths and directory
   listings are memoized so repeat operations skip the database round trip — a real
   latency win for the networked backends. It is **off by default** because a revoked

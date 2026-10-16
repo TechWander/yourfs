@@ -61,6 +61,8 @@ cargo build --release
 libnfs/libfuse 包**——剩下的动态依赖只有每个 Linux 都自带的 glibc 基础库。
 
 `YOURFS_DYNAMIC=1` 可强制动态链接；`YOURFS_LIB_PATH=<目录>` 可指定 `.a` 所在目录。
+（手工构建 musl target 时 `YOURFS_LIB_PATH` **必须**设置：不设时 `build.rs` 会回退到
+共享库，产物并非全静态。）
 
 ### musl 全静态版（可跑在 musl/Alpine 上）
 
@@ -70,8 +72,18 @@ libnfs/libfuse 包**——剩下的动态依赖只有每个 Linux 都自带的 g
 ```
 
 脚本会用 `musl-gcc` 重新编译 libfuse、libnfs，并把一切链接进**零动态依赖**的单个
-ELF（`ldd` 显示 *statically linked*）。目标机上 FUSE 本身的运行前提见
-[部署与运行前提](#部署与运行前提)。
+ELF（`ldd` 显示 *statically linked*，且无 `INTERP` 段；`file` 对这种 static-PIE
+会误报 "dynamically linked"，以 `ldd`/`readelf` 为准）。目标机上 FUSE 本身的运行
+前提见[部署与运行前提](#部署与运行前提)。
+
+### 预编译二进制
+
+GitHub Release 提供两个 x86_64 Linux 压缩包及 `SHA256SUMS.txt`：
+
+* `yourfs-<ver>-linux-x86_64-gnu.tar.gz` —— glibc 版（需 glibc ≥ 2.30）；
+* `yourfs-<ver>-linux-x86_64-musl.tar.gz` —— 全静态版，无任何共享库依赖。
+
+包内均为 `yourfs` 与 `yourfs-tool`。
 
 ## 快速上手
 
@@ -91,16 +103,25 @@ ls /mnt/yourfs        # 只有白名单内的条目可见
 umount /mnt/yourfs    # 或 fusermount -u /mnt/yourfs
 ```
 
+**`-n` URL 格式。** libnfs 要求主机名后必须带路径：只写 `nfs://host` 会被拒绝并报
+*Incomplete or invalid URL specified*——根导出必须写成 `nfs://host/`。除此之外
+**结尾斜杠不是必需的**：`nfs://host/srv/nfs/export` 与带尾斜杠的写法挂载、读取行为
+完全一致（已对真实服务端验证）。云 NAS 的挂载点（如
+`nfs://xxx.cn-beijing.nas.aliyuncs.com/`）都是根导出，所以才会总带那一个斜杠。
+
+`-X`/`-Z` 指向的数据库必须已经建好（上面第 1–2 步）：`yourfs` 启动时会校验表，
+失败即带着明确原因退出，而不是挂出一个每次访问都报 `EIO` 的视图。
+
 ## 命令行选项
 
 **`yourfs`**
 
 | 选项 | 含义 |
 |------|------|
-| `-n <url>` | 要挂载的 NFS 导出，如 `nfs://host/path`（**必填**） |
+| `-n <url>` | 要挂载的 NFS 导出：`nfs://host/path`（**必填**；主机名后必须带路径——根导出写 `nfs://host/`；此外结尾斜杠可省） |
 | `-m <path>` | 本地挂载点（**必填**，隐含只读） |
 | `-F <type>` | 白名单后端：`sqlite3` \| `postgres` \| `redis` |
-| `-X <db>` | 后端连接串（见上表） |
+| `-X <db>` | 后端连接串（见上表）；sqlite3 时文件必须已存在——`yourfs` 从不建库 |
 | `-Z <table>` | 白名单表名 / 键前缀 |
 | `-M <MB>` | SQLite 页缓存大小（默认 10） |
 | `-w` | 将白名单缓存在内存中（可选开启；仅当挂载期间白名单不会变化时启用） |
@@ -140,14 +161,15 @@ allow_other+own ids、`-p` 切换 default_permissions、`-t` 切换多线程、`
 ## License key
 
 与原版 C 项目一致，`yourfs` 挂载前会校验内置 license key（`-y`）。编译时内置了若干带
-有效期的 key，默认 `FADEP8` 有效期至 2027 年。这是原样继承的历史功能，**并非真正的访问
-控制**——真正的访问控制是白名单数据库。
+有效期的 key；省略 `-y` 时默认永远取表中**第一个** key，当前为 `FADEP8`，有效期至
+2029 年。这是原样继承的历史功能，**并非真正的访问控制**——真正的访问控制是白名单数据库。
 
 ## 测试说明
 
 `yourfs` 涉及 FUSE、内核与真实 NFS 服务，仅靠单元测试说明不了问题。白名单隔离、符号链接
-解析、写入返回 `EROFS`、`statfs`、干净卸载等端到端行为，已在真实本地 NFS 导出上，分别针对
-SQLite3 与 Redis 后端、glibc **以及**全静态 musl 的 release 二进制验证通过。
+解析、写入返回 `EROFS`、`statfs`、断连恢复、干净卸载等端到端行为，已在真实本地 NFS
+导出上，对三个后端（SQLite3、PostgreSQL、Redis——后两者经 docker 部署）、glibc
+**以及**全静态 musl 的 release 二进制验证通过。
 
 ## 设计说明
 
@@ -158,11 +180,14 @@ SQLite3 与 Redis 后端、glibc **以及**全静态 musl 的 release 二进制�
   调用文件系统前会释放内部锁）。因此各后端（SQLite3 / PostgreSQL / Redis）都从一个固定
   容量的小连接池中借出一条连接，而不是在单一互斥锁上排队。默认不缓存任何东西：每次操作
   都读实时数据库，外部新增 / 修改 / 撤销的条目立即生效。
-* **NFS 也并行。** `libnfs` 的 context 是单连接且非线程安全的，所以客户端不再用
-  一把锁保护单一 context，而是维护一组各自挂载、各自加锁的 context；一次操作跑在任意
-  空闲的 context 上。由于 `nfs_open` 返回的句柄绑定于创建它的 context，`pread`/`close`
-  会被路由回同一个 context（内部映射跟踪）。锁序严格按“先 map 后 slot”或“先释放 slot
-  再取 map”，永不嵌套，因此不会死锁。context 数量可用 `-V <N>` 调节（默认 4；`-V 1` 退回单连接）。
+* **NFS 并行 + 请求流水线。** 一个 `libnfs` context 就是一条 TCP 连接且非线程安全，
+  因此每个池内 context 由一个专属服务线程（actor 模型）持有：FUSE worker 把操作经
+  channel 交给某个 slot 后在自己的私有回执上等待，actor 则把队列里的请求**连续全部
+  发出**——多个 READ 因此搭同一个往返完成（10 ms 延迟链路上实测比串行化设计快
+  5.3 倍）。由于 `nfs_open` 返回的句柄绑定于创建它的 context，`pread`/`close` 会被
+  路由回所属 slot（内部映射跟踪；锁序永不嵌套，无死锁）。actor 采用懒启动：libfuse
+  在 `fuse_main` 内部 fork 守护化，fork 前创建的线程不会存活。context 数量可用
+  `-V <N>` 调节（默认 4；`-V 1` 即单连接流水线）。
 * **可选的白名单缓存（`-w`）。** 开启后缓存已解析的路径与目录列表，重复操作可省掉数据库
   往返——对网络后端是实打实的延迟收益。它**默认关闭**，因为被撤销的行或被改动的 `realpath`
   会继续被缓存命中而失效；仅在能确保白名单在整个挂载期间不变时才开启。
